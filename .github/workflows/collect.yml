@@ -1,6 +1,8 @@
 name: Collect public GIPHY views
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '17 */6 * * *'
 
 permissions:
   contents: read
@@ -21,6 +23,8 @@ jobs:
           ref: main
       - name: Validate parser
         run: python3 -m unittest discover -s tests -v
+      - name: Validate Wix import safeguards
+        run: node tests/test_wix.mjs
       - name: Fetch verified public count
         run: python3 scripts/collect.py
       - name: Publish verified feed

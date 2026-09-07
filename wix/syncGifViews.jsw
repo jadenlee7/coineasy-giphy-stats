@@ -1,0 +1,47 @@
+import { fetch } from 'wix-fetch';
+import wixData from 'wix-data';
+
+const FEED_URL = 'https://raw.githubusercontent.com/jadenlee7/coineasy-giphy-stats/main/stats.json';
+const SOURCE = 'https://giphy.com/coineasy';
+
+// 공개 수집 결과의 출처, 확인 시각, 숫자를 검증한 후에만 기존 CMS 항목을 갱신한다.
+export async function syncGifViews() {
+    const response = await fetch(FEED_URL, { method: 'get', headers: { Accept: 'application/json' } });
+    if (response.status !== 200) throw new Error(`GIF statistics feed failed: ${response.status}`);
+    const body = await response.text();
+    if (body.length > 4096) throw new Error('Unexpected statistics feed size');
+    const stats = JSON.parse(body);
+    if (stats.schemaVersion !== 1 || stats.channel !== 'coineasy' || stats.source !== SOURCE ||
+        stats.precision !== 'giphy-public-rounded-display') throw new Error('Unexpected statistics source');
+    const match = /^([0-9][0-9,]*(?:\.[0-9]+)?)([KMB]?)$/.exec(stats.display || '');
+    if (!match) throw new Error('Invalid GIF view display');
+    const multiplier = { '': 1, K: 1000, M: 1000000, B: 1000000000 }[match[2]];
+    const rawViews = Number(match[1].replace(/,/g, '')) * multiplier;
+    if (!Number.isSafeInteger(rawViews) || rawViews <= 0 || rawViews !== stats.approximateViews) {
+        throw new Error('Invalid GIF view count');
+    }
+    const checkedAt = new Date(stats.checkedAt);
+    const age = Date.now() - checkedAt.getTime();
+    if (!Number.isFinite(age) || age < -5 * 60 * 1000 || age > 48 * 60 * 60 * 1000) {
+        throw new Error('Stale statistics feed; retaining last verified count');
+    }
+    const result = await wixData.query('SiteStats').eq('key', 'gifViews').limit(2).find();
+    if (result.items.length !== 1) throw new Error('Expected one existing GIF statistics item');
+    const existing = result.items[0];
+    if (rawViews < Number(existing.rawViews || 0)) throw new Error('GIF count decreased; review required');
+    if (new Date(existing.updatedAt).getTime() >= checkedAt.getTime()) {
+        return { status: 'unchanged', display: existing.display, checkedAt: existing.updatedAt };
+    }
+    await wixData.update('SiteStats', {
+        ...existing,
+        display: stats.display,
+        rawViews,
+        updatedAt: checkedAt,
+    });
+    const saved = await wixData.get('SiteStats', existing._id, { consistentRead: true });
+    if (saved.display !== stats.display || new Date(saved.updatedAt).getTime() !== checkedAt.getTime()) {
+        throw new Error('GIF statistics write verification failed');
+    }
+    console.info('GIPHY statistics synchronized', saved.display, checkedAt.toISOString());
+    return { status: 'updated', display: saved.display, checkedAt: checkedAt.toISOString() };
+}
